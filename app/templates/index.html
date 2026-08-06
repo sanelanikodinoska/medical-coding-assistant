@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI Medical Coding Assistant</title>
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+<style>
+  [x-cloak] { display: none !important; }
+  .code-badge { font-family: monospace; font-size: 0.8rem; font-weight: 700; }
+  .note-area  { font-family: monospace; font-size: 0.85rem; line-height: 1.6; }
+  .spinner    { animation: spin 1s linear infinite; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+</style>
+</head>
+<body class="bg-gray-50 text-gray-800" x-data="app()" x-init="init()">
+
+<!-- Toast -->
+<div x-show="toast.show" x-cloak x-transition
+     class="fixed top-4 right-4 z-50 px-4 py-3 rounded shadow-lg text-white text-sm"
+     :class="toast.type === 'error' ? 'bg-red-600' : 'bg-green-600'">
+  <span x-text="toast.msg"></span>
+</div>
+
+<!-- Header -->
+<header class="bg-blue-700 text-white px-6 py-4 flex items-center justify-between shadow">
+  <div class="flex items-center gap-3">
+    <span class="text-2xl">🏥</span>
+    <div>
+      <h1 class="text-xl font-bold leading-tight">AI Medical Coding Assistant</h1>
+      <p class="text-blue-200 text-xs">ICD-10-CM · Powered by Databricks</p>
+    </div>
+  </div>
+  <!-- Stats bar -->
+  <div class="flex gap-6 text-center" x-show="stats.total_sessions !== undefined">
+    <div>
+      <div class="text-2xl font-bold" x-text="stats.total_sessions ?? 0"></div>
+      <div class="text-blue-200 text-xs">Sessions</div>
+    </div>
+    <div>
+      <div class="text-2xl font-bold" x-text="stats.total_suggestions ?? 0"></div>
+      <div class="text-blue-200 text-xs">Codes Suggested</div>
+    </div>
+    <div>
+      <div class="text-2xl font-bold" x-text="stats.accepted ?? 0"></div>
+      <div class="text-blue-200 text-xs">Accepted</div>
+    </div>
+    <div>
+      <div class="text-2xl font-bold" x-text="acceptanceRate + '%'"></div>
+      <div class="text-blue-200 text-xs">Acceptance Rate</div>
+    </div>
+  </div>
+</header>
+
+<!-- Main layout: left sidebar + right panel -->
+<div class="flex h-screen overflow-hidden" style="height: calc(100vh - 68px)">
+
+  <!-- LEFT: Session list -->
+  <aside class="w-72 bg-white border-r flex flex-col flex-shrink-0">
+    <div class="p-3 border-b">
+      <select x-model="filterSpecialty" @change="loadSessions()"
+              class="w-full text-sm border rounded px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-400">
+        <option value="">All Specialties</option>
+        <template x-for="s in specialties" :key="s">
+          <option :value="s" x-text="s"></option>
+        </template>
+      </select>
+    </div>
+    <div class="overflow-y-auto flex-1">
+      <template x-if="sessions.length === 0">
+        <p class="text-gray-400 text-sm text-center p-6">No sessions yet.<br>Code a note to get started.</p>
+      </template>
+      <template x-for="s in sessions" :key="s.session_id">
+        <div @click="selectSession(s.session_id)"
+             class="p-3 border-b cursor-pointer hover:bg-blue-50 transition"
+             :class="currentSession?.session_id === s.session_id ? 'bg-blue-50 border-l-4 border-l-blue-600' : ''">
+          <div class="flex items-center justify-between mb-1">
+            <span class="text-xs font-semibold text-blue-700 bg-blue-100 px-2 py-0.5 rounded"
+                  x-text="s.specialty || 'General'"></span>
+            <span class="text-xs text-gray-400" x-text="formatDate(s.created_at)"></span>
+          </div>
+          <p class="text-xs text-gray-600 leading-tight line-clamp-2" x-text="s.note_preview"></p>
+          <div class="mt-1 text-xs text-gray-400" x-text="s.suggestion_count + ' codes'"></div>
+        </div>
+      </template>
+    </div>
+  </aside>
+
+  <!-- RIGHT: Main panel (tabs: Code a Note | Session Detail) -->
+  <main class="flex-1 flex flex-col overflow-hidden">
+
+    <!-- Tabs -->
+    <div class="bg-white border-b flex">
+      <button @click="activeTab='code'"
+              class="px-5 py-3 text-sm font-medium border-b-2 transition"
+              :class="activeTab==='code' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'">
+        ✏️ Code a Note
+      </button>
+      <button @click="activeTab='detail'" :disabled="!currentSession"
+              class="px-5 py-3 text-sm font-medium border-b-2 transition"
+              :class="activeTab==='detail' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700 disabled:opacity-40'">
+        📋 Session Detail
+      </button>
+      <button @click="activeTab='search'"
+              class="px-5 py-3 text-sm font-medium border-b-2 transition"
+              :class="activeTab==='search' ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'">
+        🔍 Code Lookup
+      </button>
+    </div>
+
+    <div class="flex-1 overflow-y-auto p-6">
+
+      <!-- TAB: Code a Note -->
+      <div x-show="activeTab==='code'">
+        <h2 class="text-lg font-semibold mb-4">Paste a Clinical Note</h2>
+        <div class="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="text-xs font-medium text-gray-500 block mb-1">Specialty (optional)</label>
+            <select x-model="form.specialty" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+              <option value="">Select specialty...</option>
+              <option>Cardiology</option><option>Orthopedics</option><option>Pulmonology</option>
+              <option>Neurology</option><option>Endocrinology</option><option>Gastroenterology</option>
+              <option>Psychiatry</option><option>Nephrology</option><option>Hematology</option>
+              <option>Dermatology</option><option>Rheumatology</option><option>Urology</option>
+              <option>Infectious Disease</option><option>Obstetrics</option><option>Oncology</option>
+              <option>Ophthalmology</option><option>Pediatrics</option><option>Emergency Medicine</option>
+            </select>
+          </div>
+          <div>
+            <label class="text-xs font-medium text-gray-500 block mb-1">Coder Email (optional)</label>
+            <input x-model="form.user_email" type="email" placeholder="you@example.com"
+                   class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+          </div>
+        </div>
+        <textarea x-model="form.note_text"
+                  placeholder="Paste clinical documentation here...&#10;&#10;Example:&#10;67-year-old male with chest pain radiating to left arm, diaphoresis, and nausea. EKG shows ST elevation in leads II, III, aVF. Troponin elevated. Assessment: Inferior STEMI."
+                  class="w-full h-52 border rounded px-3 py-2 text-sm note-area focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none mb-4"></textarea>
+
+        <div class="flex items-center gap-3">
+          <button @click="submitNote()"
+                  :disabled="coding || !form.note_text.trim()"
+                  class="bg-blue-600 text-white px-6 py-2.5 rounded font-medium text-sm hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2">
+            <svg x-show="coding" class="spinner w-4 h-4" fill="none" viewBox="0 0 24 24">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+            </svg>
+            <span x-text="coding ? 'AI is coding...' : '🤖 Generate ICD-10 Codes'"></span>
+          </button>
+          <button @click="loadSample()" class="text-sm text-blue-600 hover:underline">Load sample note</button>
+          <button @click="form = {note_text:'', specialty:'', user_email:''}" class="text-sm text-gray-400 hover:underline">Clear</button>
+        </div>
+
+        <!-- Coding result (inline after submit) -->
+        <div x-show="codingResult" x-cloak class="mt-6 border rounded-lg overflow-hidden">
+          <div class="bg-green-50 border-b px-4 py-3 flex items-center justify-between">
+            <h3 class="font-semibold text-green-800">✅ Suggested ICD-10-CM Codes</h3>
+            <button @click="selectSession(codingResult.session_id); activeTab='detail'"
+                    class="text-xs text-blue-600 hover:underline">View full session →</button>
+          </div>
+          <div class="divide-y">
+            <template x-for="s in (codingResult.suggestions || [])" :key="s.suggestion_id">
+              <div class="px-4 py-3 flex items-start gap-4">
+                <span class="code-badge bg-blue-100 text-blue-800 px-2 py-1 rounded mt-0.5 whitespace-nowrap"
+                      x-text="s.icd10_code"></span>
+                <div class="flex-1 min-w-0">
+                  <div class="font-medium text-sm" x-text="s.description"></div>
+                  <div class="text-xs text-gray-500 mt-0.5" x-text="s.explanation"></div>
+                </div>
+                <div class="flex items-center gap-2 flex-shrink-0">
+                  <span class="text-xs text-gray-400" x-text="Math.round(s.confidence*100) + '%'"></span>
+                  <button @click="accept(s)" :class="s.accepted===true ? 'bg-green-600 text-white' : 'border border-green-600 text-green-700 hover:bg-green-50'"
+                          class="text-xs px-2 py-1 rounded transition">✓</button>
+                  <button @click="reject(s)" :class="s.accepted===false ? 'bg-red-600 text-white' : 'border border-red-400 text-red-600 hover:bg-red-50'"
+                          class="text-xs px-2 py-1 rounded transition">✗</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- TAB: Session Detail -->
+      <div x-show="activeTab==='detail'" x-cloak>
+        <template x-if="currentSession">
+          <div>
+            <div class="flex items-center justify-between mb-4">
+              <h2 class="text-lg font-semibold">Session #<span x-text="currentSession.session_id"></span></h2>
+              <button @click="deleteSessionConfirm()" class="text-xs text-red-500 hover:underline">Delete session</button>
+            </div>
+            <div class="grid grid-cols-3 gap-3 mb-4 text-sm">
+              <div class="bg-gray-50 rounded p-3">
+                <div class="text-xs text-gray-400">Specialty</div>
+                <div x-text="currentSession.specialty || '—'"></div>
+              </div>
+              <div class="bg-gray-50 rounded p-3">
+                <div class="text-xs text-gray-400">Coder</div>
+                <div x-text="currentSession.user_email || '—'"></div>
+              </div>
+              <div class="bg-gray-50 rounded p-3">
+                <div class="text-xs text-gray-400">Date</div>
+                <div x-text="formatDate(currentSession.created_at)"></div>
+              </div>
+            </div>
+            <div class="bg-gray-50 rounded p-3 mb-4 text-sm note-area whitespace-pre-wrap"
+                 x-text="currentSession.note_text"></div>
+
+            <h3 class="font-semibold text-sm mb-2">ICD-10-CM Codes</h3>
+            <div class="border rounded-lg divide-y mb-4">
+              <template x-for="s in (currentSession.suggestions || [])" :key="s.suggestion_id">
+                <div class="px-4 py-3 flex items-start gap-4">
+                  <span class="code-badge bg-blue-100 text-blue-800 px-2 py-1 rounded mt-0.5"
+                        x-text="s.icd10_code"></span>
+                  <div class="flex-1 min-w-0">
+                    <div class="font-medium text-sm" x-text="s.description"></div>
+                    <div class="text-xs text-gray-500 mt-0.5" x-text="s.explanation"></div>
+                  </div>
+                  <div class="flex items-center gap-2 flex-shrink-0">
+                    <span class="text-xs px-2 py-0.5 rounded"
+                          :class="s.accepted===true ? 'bg-green-100 text-green-700' : s.accepted===false ? 'bg-red-100 text-red-600' : 'bg-gray-100 text-gray-500'"
+                          x-text="s.accepted===true ? '✓ Accepted' : s.accepted===false ? '✗ Rejected' : 'Pending'"></span>
+                    <button @click="accept(s)" class="text-xs px-2 py-1 border border-green-600 text-green-700 rounded hover:bg-green-50">✓</button>
+                    <button @click="reject(s)" class="text-xs px-2 py-1 border border-red-400 text-red-600 rounded hover:bg-red-50">✗</button>
+                  </div>
+                </div>
+              </template>
+            </div>
+
+            <h3 class="font-semibold text-sm mb-2">Agent Tool Calls (audit trail)</h3>
+            <div class="bg-gray-50 rounded p-3 text-xs font-mono space-y-1">
+              <template x-for="t in (currentSession.tool_calls || [])" :key="t.call_id">
+                <div class="text-gray-600">
+                  <span class="text-blue-600" x-text="t.tool_name"></span>
+                  <span class="text-gray-400 ml-2" x-text="formatDate(t.created_at)"></span>
+                </div>
+              </template>
+              <template x-if="!(currentSession.tool_calls?.length)">
+                <div class="text-gray-400">No tool calls recorded</div>
+              </template>
+            </div>
+          </div>
+        </template>
+        <template x-if="!currentSession">
+          <p class="text-gray-400 text-center py-12">Select a session from the left panel.</p>
+        </template>
+      </div>
+
+      <!-- TAB: Code Lookup -->
+      <div x-show="activeTab==='search'">
+        <h2 class="text-lg font-semibold mb-4">ICD-10-CM Code Lookup</h2>
+        <div class="flex gap-2 mb-4">
+          <input x-model="searchQ" @keyup.enter="doSearch()"
+                 placeholder="Search: e.g. 'chest pain', 'type 2 diabetes', 'ACL tear'..."
+                 class="flex-1 border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
+          <button @click="doSearch()" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">Search</button>
+        </div>
+        <div x-show="searchResults.length > 0" class="border rounded-lg divide-y">
+          <template x-for="r in searchResults" :key="r.code">
+            <div class="px-4 py-3 flex items-center gap-4">
+              <span class="code-badge bg-blue-100 text-blue-800 px-2 py-1 rounded" x-text="r.code"></span>
+              <span class="text-sm" x-text="r.description"></span>
+            </div>
+          </template>
+        </div>
+        <p x-show="searchResults.length === 0 && searchQ" class="text-gray-400 text-sm text-center py-6">No results yet — press Search.</p>
+      </div>
+
+    </div>
+  </main>
+</div>
+
+<!-- Delete confirm modal -->
+<div x-show="showDeleteModal" x-cloak class="fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50">
+  <div class="bg-white rounded-lg shadow-xl p-6 w-80">
+    <h3 class="font-semibold mb-2">Delete Session?</h3>
+    <p class="text-sm text-gray-600 mb-4">This will permanently delete the session and all its codes.</p>
+    <div class="flex gap-3 justify-end">
+      <button @click="showDeleteModal=false" class="px-4 py-2 text-sm border rounded hover:bg-gray-50">Cancel</button>
+      <button @click="confirmDelete()" class="px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700">Delete</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function app() {
+  return {
+    // State
+    activeTab: 'code',
+    sessions: [], stats: {}, currentSession: null,
+    filterSpecialty: '',
+    form: { note_text: '', specialty: '', user_email: '' },
+    coding: false, codingResult: null,
+    searchQ: '', searchResults: [],
+    showDeleteModal: false,
+    toast: { show: false, msg: '', type: 'success' },
+
+    get specialties() {
+      return ['Cardiology','Orthopedics','Pulmonology','Neurology','Endocrinology',
+              'Gastroenterology','Psychiatry','Nephrology','Hematology','Dermatology',
+              'Rheumatology','Urology','Infectious Disease','Obstetrics','Oncology',
+              'Ophthalmology','Pediatrics','Emergency Medicine'];
+    },
+    get acceptanceRate() {
+      const total = this.stats.total_suggestions || 0;
+      const acc   = this.stats.accepted || 0;
+      return total ? Math.round(acc * 100 / total) : 0;
+    },
+
+    async init() {
+      await Promise.all([this.loadStats(), this.loadSessions()]);
+    },
+
+    async loadStats() {
+      const r = await fetch('/api/stats');
+      this.stats = await r.json();
+    },
+
+    async loadSessions() {
+      const url = this.filterSpecialty
+        ? `/api/sessions?specialty=${encodeURIComponent(this.filterSpecialty)}`
+        : '/api/sessions';
+      const r = await fetch(url);
+      this.sessions = await r.json();
+    },
+
+    async selectSession(id) {
+      const r = await fetch(`/api/sessions/${id}`);
+      this.currentSession = await r.json();
+      this.activeTab = 'detail';
+    },
+
+    async submitNote() {
+      if (!this.form.note_text.trim()) return;
+      this.coding = true;
+      this.codingResult = null;
+      try {
+        const r = await fetch('/api/code', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(this.form)
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'Failed');
+        this.codingResult = data;
+        await Promise.all([this.loadStats(), this.loadSessions()]);
+        this.showToast('Codes generated successfully!', 'success');
+      } catch(e) {
+        this.showToast(e.message, 'error');
+      } finally {
+        this.coding = false;
+      }
+    },
+
+    async accept(s) {
+      await fetch(`/api/suggestions/${s.suggestion_id}/accept`, { method: 'POST' });
+      s.accepted = true;
+      await this.loadStats();
+    },
+    async reject(s) {
+      await fetch(`/api/suggestions/${s.suggestion_id}/reject`, { method: 'POST' });
+      s.accepted = false;
+      await this.loadStats();
+    },
+
+    async doSearch() {
+      if (!this.searchQ.trim()) return;
+      const r = await fetch(`/api/search?q=${encodeURIComponent(this.searchQ)}`);
+      this.searchResults = await r.json();
+    },
+
+    deleteSessionConfirm() { this.showDeleteModal = true; },
+    async confirmDelete() {
+      await fetch(`/api/sessions/${this.currentSession.session_id}`, { method: 'DELETE' });
+      this.currentSession = null;
+      this.showDeleteModal = false;
+      await Promise.all([this.loadStats(), this.loadSessions()]);
+      this.activeTab = 'code';
+      this.showToast('Session deleted', 'success');
+    },
+
+    loadSample() {
+      this.form.note_text = `CHIEF COMPLAINT: Chest pain and shortness of breath.
+
+HISTORY: 67-year-old male with history of hypertension and type 2 diabetes mellitus presenting with substernal chest pain radiating to the left arm, onset 2 hours ago. Associated with diaphoresis and nausea. Pain rated 8/10.
+
+PAST MEDICAL HISTORY: Hypertension x 15 years, type 2 diabetes mellitus x 8 years, hyperlipidemia.
+
+ASSESSMENT:
+1. Acute inferior STEMI
+2. Hypertension
+3. Type 2 diabetes mellitus, controlled
+
+PLAN: Emergent PCI, aspirin 325mg, heparin drip, cardiology consult, ICU admission.`;
+      this.form.specialty = 'Cardiology';
+    },
+
+    formatDate(dt) {
+      if (!dt) return '';
+      return new Date(dt).toLocaleDateString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
+    },
+
+    showToast(msg, type='success') {
+      this.toast = { show: true, msg, type };
+      setTimeout(() => this.toast.show = false, 3500);
+    }
+  }
+}
+</script>
+</body>
+</html>
