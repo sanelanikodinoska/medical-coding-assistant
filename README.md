@@ -2,7 +2,9 @@
 
 **[🚀 Open Live App](https://medical-coding-assistant-7474643859693768.aws.databricksapps.com/)**
 
-**[▶️ Watch Demo Video](images/AI_Medical_Coding_Assistant_App_Demo.mp4)**
+## Demo
+
+[![Watch Demo](https://cdn.loom.com/sessions/thumbnails/LOOM_ID-with-play.gif)](https://www.loom.com/share/LOOM_ID)
 
 An AI-powered ICD-10-CM coding assistant that reads free-form clinical notes and suggests the correct diagnosis codes with explanations. Built by a certified medical coder using Databricks, Lakebase, and Llama 3.
 

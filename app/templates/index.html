@@ -118,12 +118,24 @@
             <label class="text-xs font-medium text-gray-500 block mb-1">Specialty (optional)</label>
             <select x-model="form.specialty" class="w-full border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
               <option value="">Select specialty...</option>
-              <option>Cardiology</option><option>Orthopedics</option><option>Pulmonology</option>
-              <option>Neurology</option><option>Endocrinology</option><option>Gastroenterology</option>
-              <option>Psychiatry</option><option>Nephrology</option><option>Hematology</option>
-              <option>Dermatology</option><option>Rheumatology</option><option>Urology</option>
-              <option>Infectious Disease</option><option>Obstetrics</option><option>Oncology</option>
-              <option>Ophthalmology</option><option>Pediatrics</option><option>Emergency Medicine</option>
+              <option>Allergy / Immunology</option><option>Autopsy</option><option>Bariatrics</option>
+              <option>Cardiovascular / Pulmonary</option><option>Chiropractic</option>
+              <option>Consult - History and Phy.</option><option>Cosmetic / Plastic Surgery</option>
+              <option>Dentistry</option><option>Dermatology</option><option>Diets and Nutritions</option>
+              <option>Discharge Summary</option><option>Emergency Room Reports</option>
+              <option>Endocrinology</option><option>ENT - Otolaryngology</option>
+              <option>Gastroenterology</option><option>General Medicine</option>
+              <option>Hematology - Oncology</option><option>Hospice - Palliative Care</option>
+              <option>IME-QME-Work Comp etc.</option><option>Lab Medicine - Pathology</option>
+              <option>Letters</option><option>Nephrology</option><option>Neurology</option>
+              <option>Neurosurgery</option><option>Obstetrics / Gynecology</option>
+              <option>Office Notes</option><option>Ophthalmology</option><option>Orthopedic</option>
+              <option>Pain Management</option><option>Pediatrics - Neonatal</option>
+              <option>Physical Medicine - Rehab</option><option>Podiatry</option>
+              <option>Psychiatry / Psychology</option><option>Radiology</option>
+              <option>Rheumatology</option><option>Sleep Medicine</option>
+              <option>SOAP / Chart / Progress Notes</option><option>Speech - Language</option>
+              <option>Surgery</option><option>Urology</option>
             </select>
           </div>
           <div>
@@ -321,10 +333,19 @@ function app() {
     searchHints: ['chest pain', 'hypertension', 'diabetes mellitus', 'pneumonia', 'fracture', 'myocardial infarction', 'anxiety', 'asthma'],
 
     get specialties() {
-      return ['Cardiology','Orthopedics','Pulmonology','Neurology','Endocrinology',
-              'Gastroenterology','Psychiatry','Nephrology','Hematology','Dermatology',
-              'Rheumatology','Urology','Infectious Disease','Obstetrics','Oncology',
-              'Ophthalmology','Pediatrics','Emergency Medicine'];
+      return [
+        'Allergy / Immunology','Autopsy','Bariatrics','Cardiovascular / Pulmonary',
+        'Chiropractic','Consult - History and Phy.','Cosmetic / Plastic Surgery',
+        'Dentistry','Dermatology','Diets and Nutritions','Discharge Summary',
+        'Emergency Room Reports','Endocrinology','ENT - Otolaryngology',
+        'Gastroenterology','General Medicine','Hematology - Oncology',
+        'Hospice - Palliative Care','IME-QME-Work Comp etc.','Lab Medicine - Pathology',
+        'Letters','Nephrology','Neurology','Neurosurgery','Obstetrics / Gynecology',
+        'Office Notes','Ophthalmology','Orthopedic','Pain Management',
+        'Pediatrics - Neonatal','Physical Medicine - Rehab','Podiatry',
+        'Psychiatry / Psychology','Radiology','Rheumatology','Sleep Medicine',
+        'SOAP / Chart / Progress Notes','Speech - Language','Surgery','Urology'
+      ];
     },
     get acceptanceRate() {
       const total = this.stats.total_suggestions || 0;
