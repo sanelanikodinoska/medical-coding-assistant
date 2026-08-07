@@ -33,16 +33,9 @@ cur  = conn.cursor(cursor_factory=RealDictCursor)
 # MAGIC %md ### 1 — Enable Delta CDF on target tables (idempotent)
 
 # COMMAND ----------
-for table in ("sessions_history", "suggestions_history"):
-    spark.sql(f"""
-        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.{table}
-        USING DELTA
-        TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
-    """)
-
-# sessions_history
+# Use CREATE OR REPLACE to handle schema changes from previous runs
 spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.sessions_history
+    CREATE OR REPLACE TABLE {CATALOG}.{SCHEMA}.sessions_history
     (
         session_id   BIGINT,
         specialty    STRING,
@@ -55,9 +48,8 @@ spark.sql(f"""
     TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
 """)
 
-# suggestions_history
 spark.sql(f"""
-    CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.suggestions_history
+    CREATE OR REPLACE TABLE {CATALOG}.{SCHEMA}.suggestions_history
     (
         suggestion_id BIGINT,
         session_id    BIGINT,
@@ -73,7 +65,11 @@ spark.sql(f"""
     TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
 """)
 
-# Watermark table — persists last-seen timestamp per source table
+# Watermark table — reset watermarks so full sync runs after table recreate
+spark.sql(f"""
+    DELETE FROM {CATALOG}.{SCHEMA}.cdc_watermarks
+""") if spark.catalog.tableExists(f"{CATALOG}.{SCHEMA}.cdc_watermarks") else None
+
 spark.sql(f"""
     CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.cdc_watermarks
     (
@@ -140,8 +136,16 @@ if new_sessions:
     spark.sql(f"""
         MERGE INTO {CATALOG}.{SCHEMA}.sessions_history AS t
         USING _new_sessions AS s ON t.session_id = s.session_id
-        WHEN MATCHED THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT  *
+        WHEN MATCHED THEN UPDATE SET
+            t.specialty   = s.specialty,
+            t.user_email  = s.user_email,
+            t.note_text   = s.note_text,
+            t.created_at  = s.created_at,
+            t.updated_at  = s.updated_at
+        WHEN NOT MATCHED THEN INSERT
+            (session_id, specialty, user_email, note_text, created_at, updated_at)
+        VALUES
+            (s.session_id, s.specialty, s.user_email, s.note_text, s.created_at, s.updated_at)
     """)
 
     max_ts = max(r["updated_at"] for r in new_sessions)
@@ -171,7 +175,8 @@ print(f"  New/changed rows: {len(new_sugg)}")
 
 if new_sugg:
     df_sugg = spark.createDataFrame(
-        [dict(r) for r in new_sugg],
+        [{**dict(r), "confidence": float(r["confidence"]) if r["confidence"] is not None else None}
+         for r in new_sugg],
         schema="suggestion_id BIGINT, session_id BIGINT, icd10_code STRING, "
                "description STRING, confidence DOUBLE, explanation STRING, "
                "accepted BOOLEAN, created_at TIMESTAMP, updated_at TIMESTAMP"
@@ -181,8 +186,21 @@ if new_sugg:
     spark.sql(f"""
         MERGE INTO {CATALOG}.{SCHEMA}.suggestions_history AS t
         USING _new_sugg AS s ON t.suggestion_id = s.suggestion_id
-        WHEN MATCHED THEN UPDATE SET *
-        WHEN NOT MATCHED THEN INSERT  *
+        WHEN MATCHED THEN UPDATE SET
+            t.session_id   = s.session_id,
+            t.icd10_code   = s.icd10_code,
+            t.description  = s.description,
+            t.confidence   = s.confidence,
+            t.explanation  = s.explanation,
+            t.accepted     = s.accepted,
+            t.created_at   = s.created_at,
+            t.updated_at   = s.updated_at
+        WHEN NOT MATCHED THEN INSERT
+            (suggestion_id, session_id, icd10_code, description,
+             confidence, explanation, accepted, created_at, updated_at)
+        VALUES
+            (s.suggestion_id, s.session_id, s.icd10_code, s.description,
+             s.confidence, s.explanation, s.accepted, s.created_at, s.updated_at)
     """)
 
     max_ts = max(r["updated_at"] for r in new_sugg)
@@ -205,16 +223,23 @@ from delta.tables import DeltaTable
 dt = DeltaTable.forName(spark, f"{CATALOG}.{SCHEMA}.sessions_history")
 latest_version = dt.history(1).collect()[0]["version"]
 
+# CDF data only exists from version 1+ (version 0 is CREATE TABLE, no change records)
 if latest_version >= 1:
-    changes = spark.read \
-        .format("delta") \
-        .option("readChangeFeed", "true") \
-        .option("startingVersion", max(0, latest_version - 5)) \
-        .table(f"{CATALOG}.{SCHEMA}.sessions_history")
+    try:
+        start_version = latest_version
+        changes = spark.read \
+            .format("delta") \
+            .option("readChangeFeed", "true") \
+            .option("startingVersion", start_version) \
+            .table(f"{CATALOG}.{SCHEMA}.sessions_history")
 
-    print(f"CDF — rows changed in last 5 versions: {changes.count()}")
-    changes.select("session_id", "specialty", "_change_type", "_commit_timestamp") \
-           .show(20, truncate=False)
+        print(f"CDF — rows changed since version {start_version}: {changes.count()}")
+        changes.select("session_id", "specialty", "_change_type", "_commit_timestamp") \
+               .show(20, truncate=False)
+    except Exception as e:
+        print(f"CDF read skipped: {e}")
+else:
+    print("No CDF data yet — table was just created.")
 
 # Analytics summary
 spark.sql(f"""

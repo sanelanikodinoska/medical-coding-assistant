@@ -8,19 +8,25 @@ Improvements over v1:
 - Blueprint-ready structure (single file for now)
 """
 
-import json, os, traceback
+import json, os
 import lakebase
 from flask import Flask, jsonify, render_template, request, abort
+from werkzeug.exceptions import HTTPException
 
 app = Flask(__name__)
 
-# ── Global JSON error handler ─────────────────────────────────────────────────
+# ── Global JSON error handler (API routes only) ───────────────────────────────
 
-@app.errorhandler(Exception)
-def handle_error(e):
-    code = getattr(e, "code", 500)
-    msg  = str(e) if code < 500 else "Internal server error"
-    return jsonify(error=msg), code
+@app.errorhandler(HTTPException)
+def handle_http_error(e):
+    # Only return JSON for /api/* routes; let HTML pages propagate normally
+    if request.path.startswith("/api/"):
+        return jsonify(error=e.description), e.code
+    return e
+
+@app.errorhandler(500)
+def handle_500(e):
+    return jsonify(error="Internal server error"), 500
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
