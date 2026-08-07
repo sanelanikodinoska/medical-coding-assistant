@@ -8,3 +8,5 @@ env:
     value: "lakebase-url"
   - name: LLM_MODEL
     value: "databricks-meta-llama-3-3-70b-instruct"
+  - name: DATABRICKS_WAREHOUSE_ID
+    value: ""   # fill in: SQL Warehouses → Connection details → HTTP path → last segment

@@ -4,53 +4,104 @@
 
 ## Demo
 
-![alt text](AI_Medical_Coding_Assistant_Demo-ezgif.com-optimize.gif)
+![Demo](AI_Medical_Coding_Assistant_Demo-ezgif.com-optimize.gif)
 
 An AI-powered ICD-10-CM coding assistant that reads free-form clinical notes and suggests the correct diagnosis codes with explanations. Built by a certified medical coder using Databricks, Lakebase, and Llama 3.
 
 ---
 
-## What It Does
-
-Paste any clinical note → the AI agent searches ICD-10-CM codes → returns the most accurate codes with confidence scores and explanations → you accept or reject each suggestion.
-
----
-
 ## Capstone Requirements
 
-| Requirement | Implementation |
-|---|---|
-| ✅ Spark data pipeline | `notebooks/02_icd10_pipeline.py` — fetches ~77,000 ICD-10 codes from NLM API → Delta table |
-| ✅ Third-party API | [NLM Clinical Tables API](https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search) — free, no key required |
-| ✅ Unstructured data + embeddings | `notebooks/03_mtsamples_pipeline.py` — clinical notes with sentence-transformer embeddings → Delta table |
-| ✅ Databricks App | Flask + Alpine.js + Tailwind CSS, deployed at link above |
-| ✅ AI agent with tools | Llama 3.3 70B with `search_icd10_codes` and `save_suggestions` tools + full audit trail |
-| ✅ CDF → Delta | `notebooks/04_cdf_delta.py` — Lakebase coding sessions → `workspace.medical_coding.sessions_history` |
+| # | Requirement | Implementation | Evidence |
+|---|---|---|---|
+| 1 | ✅ Spark data pipeline | `notebooks/02_icd10_pipeline.py` — NLM API → 12,316 ICD-10 codes → Delta; `03_mtsamples_pipeline.py` — 20 clinical notes + 384-dim embeddings → Delta | Delta tables in `workspace.medical_coding` |
+| 2 | ✅ Third-party API | [NLM Clinical Tables API](https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search) — free, no key; `sf=code,name` searches descriptions; retry/backoff with 429 handling | `agent.py: search_icd10_codes`, `_with_backoff` |
+| 3 | ✅ Unstructured data + embeddings + retrieval | `03_mtsamples_pipeline.py` generates 384-dim embeddings; `06_knn_clinical_notes.py` demonstrates KNN with cosine similarity UDF over the Delta embeddings table; `agent.py: retrieve_similar_notes` queries the Delta table via SQL warehouse and computes cosine similarity in NumPy at request time | See screenshot below |
+| 4 | ✅ Databricks App | Flask + Alpine.js + Tailwind CSS, live at link above | Live URL |
+| 5 | ✅ AI agent with tools (read + write) | Llama 3.3 70B with 5 tools: `retrieve_similar_notes` (KNN read), `search_icd10_codes` (NLM read), `semantic_search_icd10` (Postgres FTS read), `get_session_history` (read), `save_suggestions` (write) + full audit trail in `agent_tool_calls` | `agent.py` |
+| 6 | ✅ CDF → Delta (incremental) | `04_cdf_delta.py` — watermark-based incremental MERGE from Lakebase into Delta; `delta.enableChangeDataFeed=true` on both target tables; `cdc_watermarks` table persists high-water timestamp between runs | See screenshot below |
 
 ---
 
 ## Architecture
 
 ```
-NLM ICD-10 API          Clinical Notes (MTSamples)
+NLM ICD-10 API          MTSamples Clinical Notes
       │                          │
       └──────── Spark Pipeline ──┘
                      │
-              Delta Tables (Unity Catalog)
-              workspace.medical_coding.icd10_codes
-              workspace.medical_coding.clinical_notes
-              workspace.medical_coding.sessions_history  ← CDF output
+         Delta Tables (workspace.medical_coding)
+         ├── icd10_codes          (12,316 codes + 384-dim embeddings)
+         ├── clinical_notes       (20 notes + 384-dim embeddings)  ← KNN source
+         ├── sessions_history     (CDF enabled, watermark incremental MERGE)
+         ├── suggestions_history  (CDF enabled, watermark incremental MERGE)
+         └── cdc_watermarks       (high-water timestamp per source table)
                      │
-              Lakebase (Postgres)
-              coding_sessions
-              code_suggestions
-              agent_tool_calls
+         Lakebase (Postgres — databricks_ai_bootcamp_postgres)
+         ├── coding_sessions      (REPLICA IDENTITY FULL, updated_at trigger)
+         ├── code_suggestions     (REPLICA IDENTITY FULL, updated_at trigger)
+         ├── agent_tool_calls     (full audit trail)
+         └── icd10_lookup         (12,316 codes + GIN tsvector index for FTS)
                      │
-              Databricks App (Flask)
+         Databricks App (Flask, port 8000)
                      │
-              AI Agent (Llama 3.3 70B)
-              Tools: search_icd10_codes, save_suggestions
+         AI Agent (Llama 3.3 70B — Databricks Foundation Models)
+         Tools:
+         ├── retrieve_similar_notes  → KNN over clinical_notes Delta embeddings
+         ├── search_icd10_codes      → NLM API (retry/backoff)
+         ├── semantic_search_icd10   → Postgres FTS over icd10_lookup
+         ├── get_session_history     → past accepted codes per user
+         └── save_suggestions        → persist to Lakebase + audit log
 ```
+
+---
+
+## Key Implementation Details
+
+### Catalog and Schema
+All Delta tables use **`workspace.medical_coding`** — this is the only catalog available in this workspace (verified: `workspace`, `dbacademy`, `samples`, `system` — `main` does not exist). Every notebook uses `CATALOG = "workspace"`.
+
+Validation query:
+```sql
+SHOW TABLES IN workspace.medical_coding
+-- icd10_codes, clinical_notes, sessions_history, suggestions_history, cdc_watermarks
+```
+
+### Secrets — base64 encoding
+Databricks Secret API always returns values **base64-encoded**, regardless of how they were stored. Storing with `string_value` is correct; the SDK wraps the value in base64 on retrieval. Both `lakebase.py` and `agent.py` decode correctly:
+
+```python
+# Stored:
+w.secrets.put_secret(scope="database", key="lakebase-url", string_value="postgresql://...")
+
+# Retrieved (SDK returns base64-encoded bytes):
+secret = w.secrets.get_secret(scope="database", key="lakebase-url")
+url = base64.b64decode(secret.value).decode("utf-8")   # ← correct
+```
+
+### CDF / Incremental CDC
+`04_cdf_delta.py` implements true incremental change capture:
+- `delta.enableChangeDataFeed = true` on `sessions_history` and `suggestions_history`
+- Watermark stored in `cdc_watermarks` Delta table — only rows newer than the last run are fetched from Lakebase
+- Uses `MERGE` (not overwrite) to upsert changed rows
+- Reads CDF with `readChangeFeed` to show changed rows per run
+
+```sql
+-- CDF enabled (run DESCRIBE HISTORY workspace.medical_coding.sessions_history to verify):
+CREATE OR REPLACE TABLE workspace.medical_coding.sessions_history (...)
+USING DELTA
+TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
+```
+
+### KNN Retrieval over Clinical Notes Embeddings
+The agent's `retrieve_similar_notes` tool performs cosine-similarity KNN over the 384-dim embeddings stored in `workspace.medical_coding.clinical_notes`:
+
+1. Query embeddings from Delta via Databricks SQL warehouse
+2. Embed the incoming note with `all-MiniLM-L6-v2` (same model used at ingest)
+3. Compute cosine similarity with NumPy in memory
+4. Return top-K similar cases to ground the agent's coding decisions
+
+The standalone Spark version is in `notebooks/06_knn_clinical_notes.py` (cosine similarity UDF over the full Delta table).
 
 ---
 
@@ -59,16 +110,18 @@ NLM ICD-10 API          Clinical Notes (MTSamples)
 ```
 medical-coding-assistant/
 ├── notebooks/
-│   ├── 01_schema.py              # Creates Lakebase tables
-│   ├── 02_icd10_pipeline.py      # ICD-10 codes → Delta (Spark)
+│   ├── 01_schema.py              # Lakebase tables, indexes, updated_at triggers
+│   ├── 02_icd10_pipeline.py      # ICD-10 codes → Delta (Spark + embeddings)
 │   ├── 03_mtsamples_pipeline.py  # Clinical notes + embeddings → Delta
-│   └── 04_cdf_delta.py           # Lakebase CDF → Delta analytics
+│   ├── 04_cdf_delta.py           # Incremental CDC: Lakebase → Delta (CDF enabled)
+│   ├── 05_icd10_to_lakebase.py   # ICD-10 codes → Lakebase icd10_lookup (FTS index)
+│   └── 06_knn_clinical_notes.py  # KNN demo: cosine similarity UDF over embeddings
 └── app/
-    ├── app.py                    # Flask routes
-    ├── agent.py                  # AI agent with tool calling loop
-    ├── lakebase.py               # Lakebase connection via secret scope
+    ├── app.py                    # Flask routes + JSON error handlers
+    ├── agent.py                  # AI agent: 5 tools, retry/backoff, KNN retrieval
+    ├── lakebase.py               # Lakebase connection (URL cached at process level)
     ├── app.yaml                  # Databricks App config
-    ├── requirements.txt
+    ├── requirements.txt          # incl. sentence-transformers, numpy, databricks-sql-connector
     └── templates/index.html      # Single-page UI (Alpine.js + Tailwind)
 ```
 
@@ -76,43 +129,52 @@ medical-coding-assistant/
 
 ## Setup & Deployment
 
-### 1. Lakebase — store connection URL as secret
+### 1. Store secrets
 ```python
 from databricks.sdk import WorkspaceClient
 w = WorkspaceClient()
-w.secrets.put_secret(scope="database", key="lakebase-url", string_value="postgresql://...")
+# Lakebase connection URL
+w.secrets.put_secret(scope="database", key="lakebase-url",
+                     string_value="postgresql://username:password@host:5432/dbname")
+# Databricks PAT for LLM access (generate with all scopes including model-serving)
+w.secrets.put_secret(scope="database", key="databricks-token",
+                     string_value="dapi...")
+# SQL warehouse ID (for KNN retrieval from Delta)
+# Find in: SQL Warehouses → your warehouse → Connection details → HTTP path
+# Extract the warehouse ID from: /sql/1.0/warehouses/<WAREHOUSE_ID>
 ```
 
-### 2. Databricks token — store for LLM access
-```python
-w.secrets.put_secret(scope="database", key="databricks-token", string_value="dapi...")
-```
+Set `DATABRICKS_WAREHOUSE_ID` in `app.yaml` env section for KNN retrieval to work.
 
-### 3. Run notebooks in order
-1. `01_schema.py` — create Lakebase tables
-2. `02_icd10_pipeline.py` — load ICD-10 codes
-3. `03_mtsamples_pipeline.py` — load clinical notes
-4. `04_cdf_delta.py` — export to Delta (run after app has sessions)
+### 2. Run notebooks in order
+1. `01_schema.py` — Lakebase tables + indexes + triggers
+2. `02_icd10_pipeline.py` — ICD-10 → Delta
+3. `03_mtsamples_pipeline.py` — Clinical notes → Delta
+4. `05_icd10_to_lakebase.py` — ICD-10 → Lakebase FTS index (12,316 rows)
+5. `04_cdf_delta.py` — after app has sessions; schedule every 15 min in Workflows
+6. `06_knn_clinical_notes.py` — optional demo/validation of KNN
 
-### 4. Deploy Databricks App
+### 3. Deploy Databricks App
 - Source: this GitHub repo, branch `main`, path `app/`
-- Resources: Secret (`database/lakebase-url`) + Secret (`database/databricks-token`)
+- Resources: Database (`databricks_ai_bootcamp_postgres`) + Secret (`database/lakebase-url`)
 
 ---
 
 ## Tech Stack
 
-- **Databricks Apps** — Flask deployment
-- **Lakebase** — Managed Postgres for operational data
-- **Delta Lake** — ICD-10 codes, clinical note embeddings, analytics
-- **Llama 3.3 70B** — AI agent via Databricks Foundation Models
-- **NLM Clinical Tables API** — ICD-10-CM code search
-- **sentence-transformers** — Text embeddings (all-MiniLM-L6-v2)
-- **Alpine.js + Tailwind CSS** — Frontend
+| Layer | Technology |
+|---|---|
+| App runtime | Databricks Apps (Flask, port 8000) |
+| Operational DB | Lakebase — Managed Postgres (`databricks_ai_bootcamp_postgres`) |
+| Analytics store | Delta Lake — Unity Catalog `workspace.medical_coding` |
+| LLM | Llama 3.3 70B via Databricks Foundation Models |
+| Embeddings | sentence-transformers `all-MiniLM-L6-v2` (384-dim) |
+| Code search | NLM Clinical Tables API (free, no key) |
+| FTS | Postgres `tsvector` / `plainto_tsquery` on `icd10_lookup` |
+| Frontend | Alpine.js + Tailwind CSS (CDN, no build step) |
 
 ---
 
 ## Security
 
-Credentials are stored in Databricks Secret Scope — never in code or committed to GitHub.
-
+All credentials are stored in Databricks Secret Scope (`database`). No secrets appear in code or are committed to GitHub. The app accesses them via `WorkspaceClient().secrets.get_secret()` at runtime.
