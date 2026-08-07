@@ -363,10 +363,11 @@ function app() {
     },
 
     async doSearch() {
-      if (!this.searchQ.trim()) return;
-      const r = await fetch(`/api/search?q=${encodeURIComponent(this.searchQ)}`);
-      this.searchResults = await r.json();
+    if (!this.searchQ.trim()) return;
+    const r = await fetch(`/api/search?q=${encodeURIComponent(this.searchQ)}`);
+    this.searchResults = await r.json();
     },
+    
 
     deleteSessionConfirm() { this.showDeleteModal = true; },
     async confirmDelete() {
