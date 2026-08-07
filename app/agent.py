@@ -109,16 +109,16 @@ TOOL_MAP = {
 # ── Agent runner ─────────────────────────────────────────────────────────────
 
 def get_llm_client():
-    try:
-        import openai
-        from databricks.sdk import WorkspaceClient
-        w = WorkspaceClient()
-        return openai.OpenAI(
-            api_key=w.config.token,
-            base_url=f"{w.config.host}/serving-endpoints"
-        )
-    except Exception as e:
-        raise RuntimeError(f"Could not create LLM client: {e}")
+    import openai, base64
+    from databricks.sdk import WorkspaceClient
+    w = WorkspaceClient()
+    host = w.config.host
+    secret = w.secrets.get_secret(scope="database", key="databricks-token")
+    token  = base64.b64decode(secret.value).decode("utf-8")
+    return openai.OpenAI(
+        api_key=token,
+        base_url=f"{host}/serving-endpoints"
+    )
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "databricks-meta-llama-3-3-70b-instruct")
 
