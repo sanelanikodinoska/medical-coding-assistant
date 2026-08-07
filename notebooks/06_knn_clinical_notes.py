@@ -28,10 +28,10 @@ MODEL   = "all-MiniLM-L6-v2"   # same model used in notebook 03
 
 # COMMAND ----------
 df = spark.table(f"{CATALOG}.{SCHEMA}.clinical_notes") \
-          .select("note_id", "specialty", "note_text", "embedding")
+          .select("specialty", "note_text", "embedding")
 
 print(f"Clinical notes: {df.count()}")
-df.select("note_id", "specialty").show(truncate=False)
+df.select("specialty").show(truncate=False)
 
 # COMMAND ----------
 # MAGIC %md ### 2 — Embed the query note
@@ -76,7 +76,7 @@ results = (
     df.withColumn("similarity", cosine_similarity(F.col("embedding")))
       .orderBy(F.col("similarity").desc())
       .limit(K)
-      .select("note_id", "specialty", "similarity",
+      .select("specialty", "similarity",
               F.expr("LEFT(note_text, 200)").alias("note_preview"))
 )
 
@@ -99,10 +99,8 @@ results.show(K, truncate=False)
 # COMMAND ----------
 spark.sql(f"""
     SELECT
-        COUNT(*)                         AS total_notes,
-        COUNT(embedding)                 AS with_embedding,
-        SIZE(embedding)                  AS embedding_dim,
-        ROUND(AVG(AGGREGATE(embedding, 0D,
-              (acc, x) -> acc + x * x)), 4) AS avg_sq_norm
+        COUNT(*)             AS total_notes,
+        COUNT(embedding)     AS with_embedding,
+        SIZE(embedding)      AS embedding_dim
     FROM {CATALOG}.{SCHEMA}.clinical_notes
 """).show()

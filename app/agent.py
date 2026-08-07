@@ -73,7 +73,7 @@ def _load_clinical_notes():
         ) as conn:
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT note_id, specialty, note_text, embedding
+                    SELECT specialty, note_text, embedding
                     FROM workspace.medical_coding.clinical_notes
                 """)
                 rows = cur.fetchall()
