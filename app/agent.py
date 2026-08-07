@@ -110,18 +110,12 @@ TOOL_MAP = {
 
 def get_llm_client():
     try:
-        import openai, base64
+        import openai
         from databricks.sdk import WorkspaceClient
         w = WorkspaceClient()
-        host = w.config.host
-
-        # Read token from secret scope
-        secret = w.secrets.get_secret(scope="database", key="databricks-token")
-        token  = base64.b64decode(secret.value).decode("utf-8")
-
         return openai.OpenAI(
-            api_key=token,
-            base_url=f"{host}/serving-endpoints"
+            api_key=w.config.token,
+            base_url=f"{w.config.host}/serving-endpoints"
         )
     except Exception as e:
         raise RuntimeError(f"Could not create LLM client: {e}")
@@ -204,8 +198,39 @@ def run_agent(session_id: int, note_text: str, specialty: str = None) -> list[di
                 "content": json.dumps(result)
             })
 
-    # Return saved suggestions from DB
-    return lakebase.run_query(
+    # Check if suggestions were saved
+    suggestions = lakebase.run_query(
         "SELECT * FROM code_suggestions WHERE session_id = %s ORDER BY confidence DESC",
         (session_id,)
     )
+
+    # If agent never called save_suggestions, force it
+    if not suggestions:
+        messages.append({
+            "role": "user",
+            "content": "You MUST now call save_suggestions with all the ICD-10 codes you found above. Do not write text — call the tool."
+        })
+        force_resp = client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=messages,
+            tools=TOOLS,
+            tool_choice={"type": "function", "function": {"name": "save_suggestions"}},
+            max_tokens=2000
+        )
+        force_msg = force_resp.choices[0].message
+        if force_msg.tool_calls:
+            for tc in force_msg.tool_calls:
+                fn_args = json.loads(tc.function.arguments)
+                fn_args["session_id"] = session_id
+                result = save_suggestions(**fn_args)
+                try:
+                    log_tool_call(session_id, "save_suggestions_forced", fn_args, result)
+                except Exception:
+                    pass
+
+        suggestions = lakebase.run_query(
+            "SELECT * FROM code_suggestions WHERE session_id = %s ORDER BY confidence DESC",
+            (session_id,)
+        )
+
+    return suggestions
