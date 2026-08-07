@@ -250,7 +250,7 @@
         <h2 class="text-lg font-semibold mb-4">ICD-10-CM Code Lookup</h2>
         <div class="flex gap-2 mb-4">
           <input x-model="searchQ" @keyup.enter="doSearch()"
-                 placeholder="Search: e.g. 'chest pain', 'type 2 diabetes', 'ACL tear'..."
+                 placeholder="Enter medical term (e.g. myocardial infarction, hypertension, ACL tear)..."
                  class="flex-1 border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
           <button @click="doSearch()" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">Search</button>
         </div>
@@ -362,13 +362,18 @@ function app() {
       await this.loadStats();
     },
 
-    async doSearch() {
-    if (!this.searchQ.trim()) return;
-    const r = await fetch(`/api/search?q=${encodeURIComponent(this.searchQ)}`);
-    this.searchResults = await r.json();
+   async doSearch() {
+      if (!this.searchQ.trim()) return;
+      try {
+        const url = `https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search?terms=${encodeURIComponent(this.searchQ)}&maxList=10&df=code,name`;
+        const r = await fetch(url);
+        const data = await r.json();
+        this.searchResults = (data[3] || []).map(item => ({ code: item[0], description: item[1] }));
+      } catch(e) {
+        this.searchResults = [];
+      }
     },
     
-
     deleteSessionConfirm() { this.showDeleteModal = true; },
     async confirmDelete() {
       await fetch(`/api/sessions/${this.currentSession.session_id}`, { method: 'DELETE' });
