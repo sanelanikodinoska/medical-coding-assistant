@@ -159,7 +159,7 @@
                     class="text-xs text-blue-600 hover:underline">View full session →</button>
           </div>
           <div class="divide-y">
-            <template x-for="s in (codingResult.suggestions || [])" :key="s.suggestion_id">
+            <template x-for="s in (codingResult?.suggestions || [])" :key="s.suggestion_id">
               <div class="px-4 py-3 flex items-start gap-4">
                 <span class="code-badge bg-blue-100 text-blue-800 px-2 py-1 rounded mt-0.5 whitespace-nowrap"
                       x-text="s.icd10_code"></span>
@@ -207,7 +207,7 @@
 
             <h3 class="font-semibold text-sm mb-2">ICD-10-CM Codes</h3>
             <div class="border rounded-lg divide-y mb-4">
-              <template x-for="s in (currentSession.suggestions || [])" :key="s.suggestion_id">
+              <template x-for="s in (currentSession?.suggestions || [])" :key="s.suggestion_id">
                 <div class="px-4 py-3 flex items-start gap-4">
                   <span class="code-badge bg-blue-100 text-blue-800 px-2 py-1 rounded mt-0.5"
                         x-text="s.icd10_code"></span>
@@ -228,7 +228,7 @@
 
             <h3 class="font-semibold text-sm mb-2">Agent Tool Calls (audit trail)</h3>
             <div class="bg-gray-50 rounded p-3 text-xs font-mono space-y-1">
-              <template x-for="t in (currentSession.tool_calls || [])" :key="t.call_id">
+              <template x-for="t in (currentSession?.tool_calls || [])" :key="t.call_id">
                 <div class="text-gray-600">
                   <span class="text-blue-600" x-text="t.tool_name"></span>
                   <span class="text-gray-400 ml-2" x-text="formatDate(t.created_at)"></span>
