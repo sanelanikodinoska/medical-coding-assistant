@@ -4,20 +4,25 @@ Uses Databricks Foundation Models (Llama) with tool calling.
 
 Improvements over v1:
 - LLM client cached at module level (one secret fetch per process)
-- search_icd10_codes includes sf=code,name for full description search
-- semantic_search_icd10 tool uses Postgres full-text search over icd10_lookup table
-- get_session_history wired into TOOLS so agent can reference past sessions
+- search_icd10_codes includes sf=code,name + exponential backoff/retry
+- semantic_search_icd10 uses Postgres FTS on icd10_lookup table
+- retrieve_similar_notes does cosine-similarity KNN over clinical_notes
+  embeddings stored in workspace.medical_coding.clinical_notes (Delta)
+- get_session_history wired into TOOLS
 - Forced save step retained for reliability
 """
 
-import json, os, requests
+import json, os, time, requests
+import numpy as np
 import lakebase
 
 NLM_URL = "https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search"
 
-# ── Cached LLM client (created once per process) ─────────────────────────────
+# ── Cached singletons ─────────────────────────────────────────────────────────
 
-_llm_client = None
+_llm_client     = None
+_embed_model    = None   # sentence-transformers model (lazy-loaded)
+_clinical_notes = None   # list of {note_id, specialty, note_text, embedding}
 
 def get_llm_client():
     global _llm_client
@@ -34,27 +39,129 @@ def get_llm_client():
     )
     return _llm_client
 
+def _get_embed_model():
+    """Lazy-load sentence-transformer model (same model used in notebook 03)."""
+    global _embed_model
+    if _embed_model is None:
+        from sentence_transformers import SentenceTransformer
+        _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embed_model
+
+def _load_clinical_notes():
+    """
+    Fetch clinical note embeddings from Delta via Databricks SQL warehouse.
+    Cached at module level — loaded once per process.
+    """
+    global _clinical_notes
+    if _clinical_notes is not None:
+        return _clinical_notes
+    try:
+        import base64
+        from databricks.sdk import WorkspaceClient
+        from databricks import sql as dbsql
+        w   = WorkspaceClient()
+        sec = w.secrets.get_secret(scope="database", key="databricks-token")
+        tok = base64.b64decode(sec.value).decode("utf-8")
+        warehouse_id = os.environ.get("DATABRICKS_WAREHOUSE_ID", "")
+        if not warehouse_id:
+            _clinical_notes = []
+            return _clinical_notes
+        with dbsql.connect(
+            server_hostname = w.config.host.replace("https://", ""),
+            http_path       = f"/sql/1.0/warehouses/{warehouse_id}",
+            access_token    = tok,
+        ) as conn:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT note_id, specialty, note_text, embedding
+                    FROM workspace.medical_coding.clinical_notes
+                """)
+                rows = cur.fetchall()
+                cols = [d[0] for d in cur.description]
+                _clinical_notes = [dict(zip(cols, r)) for r in rows]
+    except Exception:
+        _clinical_notes = []
+    return _clinical_notes
+
 LLM_MODEL = os.environ.get("LLM_MODEL", "databricks-meta-llama-3-3-70b-instruct")
+
+# ── Retry helper ──────────────────────────────────────────────────────────────
+
+def _with_backoff(fn, max_retries=3, base_delay=1.0):
+    """Exponential backoff retry — handles 429 and transient network errors."""
+    for attempt in range(max_retries):
+        try:
+            return fn()
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                wait = base_delay * (2 ** attempt)
+                time.sleep(wait)
+            elif attempt == max_retries - 1:
+                raise
+        except (requests.exceptions.ConnectionError,
+                requests.exceptions.Timeout):
+            if attempt == max_retries - 1:
+                raise
+            time.sleep(base_delay * (2 ** attempt))
+    return None
 
 # ── Tool implementations ─────────────────────────────────────────────────────
 
 def search_icd10_codes(query: str, max_results: int = 8) -> list[dict]:
-    """Search ICD-10-CM codes via NLM API (searches both code and description)."""
-    try:
+    """Search ICD-10-CM codes via NLM API with retry/backoff."""
+    def _call():
         r = requests.get(
             NLM_URL,
-            params={
-                "terms":   query,
-                "maxList": max_results,
-                "df":      "code,name",
-                "sf":      "code,name",   # search in description too
-            },
+            params={"terms": query, "maxList": max_results,
+                    "df": "code,name", "sf": "code,name"},
             timeout=10
         )
         r.raise_for_status()
         data  = r.json()
         items = data[3] if len(data) > 3 else []
         return [{"code": item[0], "description": item[1]} for item in items]
+    try:
+        return _with_backoff(_call) or []
+    except Exception as e:
+        return [{"error": str(e)}]
+
+def retrieve_similar_notes(note_text: str, top_k: int = 3) -> list[dict]:
+    """
+    KNN retrieval over workspace.medical_coding.clinical_notes embeddings (Delta).
+    Embeds the query with all-MiniLM-L6-v2 (same model used at ingest time),
+    computes cosine similarity against all stored 384-dim embeddings in memory,
+    and returns the top-K most similar clinical cases with their specialties.
+
+    Used to ground ICD-10 suggestions in historically similar cases.
+    See notebooks/06_knn_clinical_notes.py for the Spark version of this logic.
+    """
+    try:
+        notes = _load_clinical_notes()
+        if not notes:
+            return [{"info": "clinical_notes not available (set DATABRICKS_WAREHOUSE_ID)"}]
+
+        model          = _get_embed_model()
+        query_emb      = model.encode(note_text, normalize_embeddings=True)
+
+        scored = []
+        for n in notes:
+            emb = n.get("embedding")
+            if not emb:
+                continue
+            v    = np.array(emb, dtype=np.float32)
+            v   /= (np.linalg.norm(v) or 1.0)
+            sim  = float(np.dot(query_emb, v))
+            scored.append((sim, n))
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        return [
+            {
+                "similarity":   round(sim, 4),
+                "specialty":    n["specialty"],
+                "note_preview": (n["note_text"] or "")[:300],
+            }
+            for sim, n in scored[:top_k]
+        ]
     except Exception as e:
         return [{"error": str(e)}]
 
@@ -130,8 +237,29 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "retrieve_similar_notes",
+            "description": (
+                "KNN retrieval: finds the most similar clinical cases in the "
+                "workspace.medical_coding.clinical_notes Delta table using "
+                "384-dim sentence-transformer embeddings and cosine similarity. "
+                "Call FIRST to ground suggestions in historically similar cases."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "note_text": {"type": "string",
+                                  "description": "The clinical note text to find similar cases for"},
+                    "top_k":    {"type": "integer", "default": 3}
+                },
+                "required": ["note_text"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_icd10_codes",
-            "description": "Search ICD-10-CM codes via NLM API. Use for specific medical terms.",
+            "description": "Search ICD-10-CM codes via NLM API (with retry/backoff). Use for specific medical terms.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -147,9 +275,8 @@ TOOLS = [
         "function": {
             "name": "semantic_search_icd10",
             "description": (
-                "Semantic full-text search over all ICD-10-CM codes using Postgres. "
-                "Use this when search_icd10_codes returns no results or when you need "
-                "broader clinical phrase matching."
+                "Full-text search over 12,316 ICD-10-CM codes in Lakebase (Postgres tsvector). "
+                "Use when search_icd10_codes returns no results."
             ),
             "parameters": {
                 "type": "object",
@@ -206,10 +333,11 @@ TOOLS = [
 ]
 
 TOOL_MAP = {
-    "search_icd10_codes":    search_icd10_codes,
-    "semantic_search_icd10": semantic_search_icd10,
-    "get_session_history":   get_session_history,
-    "save_suggestions":      save_suggestions,
+    "retrieve_similar_notes": retrieve_similar_notes,
+    "search_icd10_codes":     search_icd10_codes,
+    "semantic_search_icd10":  semantic_search_icd10,
+    "get_session_history":    get_session_history,
+    "save_suggestions":       save_suggestions,
 }
 
 # ── System prompt ─────────────────────────────────────────────────────────────
@@ -218,8 +346,10 @@ SYSTEM_PROMPT = """You are an expert medical coder specializing in ICD-10-CM cod
 Your job is to read clinical documentation and assign the most accurate diagnosis codes.
 
 When given a clinical note:
-1. Identify ALL significant diagnoses, conditions, and complications mentioned
-2. For each condition, call search_icd10_codes. If it returns no results, call semantic_search_icd10
+1. Call retrieve_similar_notes to find historically similar cases — use their
+   specialties and context to inform your coding decisions
+2. For each identified diagnosis, call search_icd10_codes. If it returns no
+   results, call semantic_search_icd10 (Postgres full-text search over 12,316 codes)
 3. Select the most specific code available (avoid unspecified codes when specificity exists)
 4. After finding all codes, call save_suggestions with ALL codes and your reasoning
 5. Follow coding guidelines: code the principal diagnosis first, then secondary diagnoses
