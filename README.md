@@ -56,6 +56,47 @@ NLM ICD-10 API          MTSamples Clinical Notes
 
 ---
 
+## Screenshots
+
+### App — Code a Note & Suggestions
+![Code suggestions](images/Code_suggestions.png)
+![7th character warning](images/7th_char_warn.png)
+![Session details](images/Session_details.png)
+
+### App — Session Detail & Agent Audit Trail
+![Agent tool calling](images/Agent_tool_calling.png)
+![Audit trail](images/Audit_trails_agent_calls.png)
+![Session app calling LLM](images/Session_app_calling_llm.png)
+
+### App — Semantic Search & Save Suggestions
+![Semantic search tool](images/Semantic_search_tool.png)
+![Semantic search and save](images/Semantic_search_tool_and_save_suggestion.png)
+
+### Code Lookup
+![Search code result](images/Search_code_result.png)
+![AI search by note](images/AI_search_by_note.png)
+![AI search by note result](images/AI_search_by_note_result.png)
+
+### KNN Retrieval over Clinical Notes Embeddings (Notebook 06)
+![KNN output](images/KNN_output.png)
+
+### ICD-10 Lakebase Full-Text Search
+![icd10_lookup FTS result](<images/icd10_lookup FTS result.png>)
+
+### CDF / Incremental CDC (Notebook 04)
+![CDF enabled — DESCRIBE HISTORY](images/CDF_enabled_describe_history.png)
+![CDF incremental output](images/CDF_incremental.png)
+![CDF improvement](images/CDF_improvment.png)
+![CDF Delta tables](images/CDF_delta_tables.png)
+
+### Unity Catalog — workspace.medical_coding Tables
+![Show tables in catalog](images/Show_tables_in_catalog.png)
+
+### Coding Sessions
+![Coding sessions](images/Coding_sessions.png)
+
+---
+
 ## Key Implementation Details
 
 ### Catalog and Schema
