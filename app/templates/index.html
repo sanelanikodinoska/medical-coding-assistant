@@ -262,7 +262,11 @@
             </div>
           </template>
         </div>
-        <p x-show="searchResults.length === 0 && searchQ" class="text-gray-400 text-sm text-center py-6">No results yet — press Search.</p>
+      <p x-show="searchDone && searchResults.length === 0"
+   class="text-amber-700 bg-amber-50 border border-amber-200 rounded p-3 text-sm mt-2">
+  No results found. Please use medical terminology — e.g. <em>myocardial infarction</em>, <em>hypertension</em>, <em>fracture femur</em>, <em>pneumonia</em>.
+</p>
+
       </div>
 
     </div>
@@ -290,7 +294,7 @@ function app() {
     filterSpecialty: '',
     form: { note_text: '', specialty: '', user_email: '' },
     coding: false, codingResult: null,
-    searchQ: '', searchResults: [],
+    searchQ: '', searchResults: [], searchDone: false,
     showDeleteModal: false,
     toast: { show: false, msg: '', type: 'success' },
 
@@ -364,6 +368,7 @@ function app() {
 
    async doSearch() {
       if (!this.searchQ.trim()) return;
+      this.searchDone = false;
       try {
         const url = `https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search?terms=${encodeURIComponent(this.searchQ)}&maxList=10&df=code,name`;
         const r = await fetch(url);
