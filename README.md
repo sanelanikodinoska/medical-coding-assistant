@@ -4,7 +4,7 @@
 
 ## Demo
 
-[![Watch Demo](https://cdn.loom.com/sessions/thumbnails/LOOM_ID-with-play.gif)](https://www.loom.com/share/LOOM_ID)
+![alt text](AI_Medical_Coding_Assistant_Demo-ezgif.com-optimize.gif)
 
 An AI-powered ICD-10-CM coding assistant that reads free-form clinical notes and suggests the correct diagnosis codes with explanations. Built by a certified medical coder using Databricks, Lakebase, and Llama 3.
 
