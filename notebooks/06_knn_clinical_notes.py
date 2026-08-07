@@ -11,6 +11,9 @@
 # MAGIC ICD-10 suggestions in historically similar clinical cases.
 
 # COMMAND ----------
+# MAGIC %pip install sentence-transformers --quiet
+
+# COMMAND ----------
 import numpy as np
 from pyspark.sql import functions as F
 from pyspark.sql.types import FloatType
