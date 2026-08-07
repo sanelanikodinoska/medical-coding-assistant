@@ -32,7 +32,6 @@
       <p class="text-blue-200 text-xs">ICD-10-CM · Powered by Databricks</p>
     </div>
   </div>
-  <!-- Stats bar -->
   <div class="flex gap-6 text-center" x-show="stats.total_sessions !== undefined">
     <div>
       <div class="text-2xl font-bold" x-text="stats.total_sessions ?? 0"></div>
@@ -53,7 +52,7 @@
   </div>
 </header>
 
-<!-- Main layout: left sidebar + right panel -->
+<!-- Main layout -->
 <div class="flex h-screen overflow-hidden" style="height: calc(100vh - 68px)">
 
   <!-- LEFT: Session list -->
@@ -87,7 +86,7 @@
     </div>
   </aside>
 
-  <!-- RIGHT: Main panel (tabs: Code a Note | Session Detail) -->
+  <!-- RIGHT: Main panel -->
   <main class="flex-1 flex flex-col overflow-hidden">
 
     <!-- Tabs -->
@@ -134,7 +133,7 @@
           </div>
         </div>
         <textarea x-model="form.note_text"
-                  placeholder="Paste clinical documentation here...&#10;&#10;Example:&#10;67-year-old male with chest pain radiating to left arm, diaphoresis, and nausea. EKG shows ST elevation in leads II, III, aVF. Troponin elevated. Assessment: Inferior STEMI."
+                  placeholder="Paste clinical documentation here...&#10;&#10;Example:&#10;67-year-old male with chest pain radiating to left arm, diaphoresis, and nausea. EKG shows ST elevation. Assessment: Inferior STEMI."
                   class="w-full h-52 border rounded px-3 py-2 text-sm note-area focus:outline-none focus:ring-2 focus:ring-blue-400 resize-none mb-4"></textarea>
 
         <div class="flex items-center gap-3">
@@ -151,11 +150,11 @@
           <button @click="form = {note_text:'', specialty:'', user_email:''}" class="text-sm text-gray-400 hover:underline">Clear</button>
         </div>
 
-        <!-- Coding result (inline after submit) -->
+        <!-- Coding result -->
         <div x-show="codingResult" x-cloak class="mt-6 border rounded-lg overflow-hidden">
           <div class="bg-green-50 border-b px-4 py-3 flex items-center justify-between">
             <h3 class="font-semibold text-green-800">✅ Suggested ICD-10-CM Codes</h3>
-            <button @click="selectSession(codingResult.session_id); activeTab='detail'"
+            <button @click="selectSession(codingResult?.session_id); activeTab='detail'"
                     class="text-xs text-blue-600 hover:underline">View full session →</button>
           </div>
           <div class="divide-y">
@@ -202,7 +201,7 @@
                 <div x-text="formatDate(currentSession.created_at)"></div>
               </div>
             </div>
-            <div class="bg-gray-50 rounded p-3 mb-4 text-sm note-area whitespace-pre-wrap"
+            <div class="bg-gray-50 rounded p-3 mb-4 text-sm note-area whitespace-pre-wrap max-h-48 overflow-y-auto"
                  x-text="currentSession.note_text"></div>
 
             <h3 class="font-semibold text-sm mb-2">ICD-10-CM Codes</h3>
@@ -228,13 +227,13 @@
 
             <h3 class="font-semibold text-sm mb-2">Agent Tool Calls (audit trail)</h3>
             <div class="bg-gray-50 rounded p-3 text-xs font-mono space-y-1">
-              <template x-for="t in (currentSession?.tool_calls || [])" :key="t.call_id">
+              <template x-for="t in (currentSession?.tool_calls || [])" :key="t.created_at">
                 <div class="text-gray-600">
                   <span class="text-blue-600" x-text="t.tool_name"></span>
                   <span class="text-gray-400 ml-2" x-text="formatDate(t.created_at)"></span>
                 </div>
               </template>
-              <template x-if="!(currentSession.tool_calls?.length)">
+              <template x-if="!(currentSession?.tool_calls?.length)">
                 <div class="text-gray-400">No tool calls recorded</div>
               </template>
             </div>
@@ -247,13 +246,27 @@
 
       <!-- TAB: Code Lookup -->
       <div x-show="activeTab==='search'">
-        <h2 class="text-lg font-semibold mb-4">ICD-10-CM Code Lookup</h2>
-        <div class="flex gap-2 mb-4">
+        <h2 class="text-lg font-semibold mb-1">ICD-10-CM Code Lookup</h2>
+        <p class="text-xs text-gray-500 mb-4">Search using medical terminology for best results.</p>
+        <div class="flex gap-2 mb-3">
           <input x-model="searchQ" @keyup.enter="doSearch()"
-                 placeholder="Enter medical term (e.g. myocardial infarction, hypertension, ACL tear)..."
+                 placeholder="e.g. myocardial infarction, hypertension, ACL tear, pneumonia..."
                  class="flex-1 border rounded px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-400">
           <button @click="doSearch()" class="bg-blue-600 text-white px-4 py-2 rounded text-sm hover:bg-blue-700">Search</button>
         </div>
+
+        <!-- Suggestions chips -->
+        <div class="flex flex-wrap gap-2 mb-4">
+          <span class="text-xs text-gray-400">Try:</span>
+          <template x-for="hint in searchHints" :key="hint">
+            <button @click="searchQ = hint; doSearch()"
+                    class="text-xs bg-blue-50 text-blue-700 border border-blue-200 px-2 py-1 rounded hover:bg-blue-100">
+              <span x-text="hint"></span>
+            </button>
+          </template>
+        </div>
+
+        <!-- Results -->
         <div x-show="searchResults.length > 0" class="border rounded-lg divide-y">
           <template x-for="r in searchResults" :key="r.code">
             <div class="px-4 py-3 flex items-center gap-4">
@@ -262,11 +275,20 @@
             </div>
           </template>
         </div>
-      <p x-show="searchDone && searchResults.length === 0"
-   class="text-amber-700 bg-amber-50 border border-amber-200 rounded p-3 text-sm mt-2">
-  No results found. Please use medical terminology — e.g. <em>myocardial infarction</em>, <em>hypertension</em>, <em>fracture femur</em>, <em>pneumonia</em>.
-</p>
 
+        <!-- No results message -->
+        <div x-show="searchDone && searchResults.length === 0"
+             class="text-amber-700 bg-amber-50 border border-amber-200 rounded p-4 text-sm">
+          <p class="font-medium mb-1">No results found.</p>
+          <p>This search requires medical terminology. Instead of everyday words, try:</p>
+          <ul class="mt-2 space-y-1 list-disc list-inside text-amber-800">
+            <li>"nausea and vomiting" → <strong>nausea vomiting</strong></li>
+            <li>"stomach pain" → <strong>abdominal pain</strong></li>
+            <li>"heart attack" → <strong>myocardial infarction</strong></li>
+            <li>"broken bone" → <strong>fracture</strong></li>
+            <li>"high blood pressure" → <strong>hypertension</strong></li>
+          </ul>
+        </div>
       </div>
 
     </div>
@@ -288,7 +310,6 @@
 <script>
 function app() {
   return {
-    // State
     activeTab: 'code',
     sessions: [], stats: {}, currentSession: null,
     filterSpecialty: '',
@@ -297,6 +318,7 @@ function app() {
     searchQ: '', searchResults: [], searchDone: false,
     showDeleteModal: false,
     toast: { show: false, msg: '', type: 'success' },
+    searchHints: ['chest pain', 'hypertension', 'diabetes mellitus', 'pneumonia', 'fracture', 'myocardial infarction', 'anxiety', 'asthma'],
 
     get specialties() {
       return ['Cardiology','Orthopedics','Pulmonology','Neurology','Endocrinology',
@@ -366,19 +388,21 @@ function app() {
       await this.loadStats();
     },
 
-   async doSearch() {
+    async doSearch() {
       if (!this.searchQ.trim()) return;
       this.searchDone = false;
+      this.searchResults = [];
       try {
-        const url = `https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search?terms=${encodeURIComponent(this.searchQ)}&maxList=10&df=code,name`;
+        const url = `https://clinicaltables.nlm.nih.gov/api/icd10cm/v3/search?terms=${encodeURIComponent(this.searchQ)}&maxList=10&df=code,name&sf=code,name`;
         const r = await fetch(url);
         const data = await r.json();
         this.searchResults = (data[3] || []).map(item => ({ code: item[0], description: item[1] }));
       } catch(e) {
         this.searchResults = [];
       }
+      this.searchDone = true;
     },
-    
+
     deleteSessionConfirm() { this.showDeleteModal = true; },
     async confirmDelete() {
       await fetch(`/api/sessions/${this.currentSession.session_id}`, { method: 'DELETE' });
