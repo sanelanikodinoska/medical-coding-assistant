@@ -1,3 +1,9 @@
+"""
+Lakebase (Postgres) connection helper.
+The URL is fetched from Databricks secret scope once and cached for the lifetime
+of the process — avoiding repeated SDK calls on every query.
+"""
+
 import base64, os
 from contextlib import contextmanager
 import psycopg2
@@ -12,13 +18,20 @@ except ImportError:
 _SCOPE = os.environ.get("LAKEBASE_SECRET_SCOPE", "database")
 _KEY   = os.environ.get("LAKEBASE_SECRET_KEY",   "lakebase-url")
 
+# Cached at module level — fetched once on first use
+_cached_url: str | None = None
+
 def _lakebase_url() -> str:
+    global _cached_url
+    if _cached_url:
+        return _cached_url
     url = os.environ.get("LAKEBASE_URL")
-    if url:
-        return url
-    from databricks.sdk import WorkspaceClient
-    secret = WorkspaceClient().secrets.get_secret(scope=_SCOPE, key=_KEY)
-    return base64.b64decode(secret.value).decode("utf-8")
+    if not url:
+        from databricks.sdk import WorkspaceClient
+        secret = WorkspaceClient().secrets.get_secret(scope=_SCOPE, key=_KEY)
+        url = base64.b64decode(secret.value).decode("utf-8")
+    _cached_url = url
+    return url
 
 @contextmanager
 def get_connection():

@@ -1,140 +1,235 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # 04 — CDF: Lakebase → Delta
-# MAGIC Reads coding sessions from Lakebase and writes them to a Delta table for analytics.
-# MAGIC This satisfies the "Change Data Feed from Lakebase into a Delta table" requirement.
+# MAGIC # Notebook 04 — Lakebase → Delta (Incremental CDC)
 # MAGIC
-# MAGIC Run this notebook after the app has some sessions, or schedule it to run hourly.
+# MAGIC Implements a true incremental change-capture pipeline:
+# MAGIC
+# MAGIC 1. Reads only rows *newer than* the last watermark from Lakebase
+# MAGIC 2. MERGEs new/changed rows into Delta target tables
+# MAGIC 3. Delta Change Data Feed (CDF) is enabled so downstream consumers
+# MAGIC    can read only changed rows with `readChangeFeed`
+# MAGIC 4. A watermark table persists the high-water timestamp between runs
+# MAGIC
+# MAGIC Run on a schedule (e.g., every 15 min via Databricks Workflows).
 
 # COMMAND ----------
-
-import base64, psycopg2, json
-from datetime import datetime
-from pyspark.sql import SparkSession
-from pyspark.sql.types import *
-
-spark = SparkSession.builder.getOrCreate()
-
-# COMMAND ----------
-
-# MAGIC %md ## Step 1 — Read current data from Lakebase
-
-# COMMAND ----------
-
+import base64, psycopg2
+from psycopg2.extras import RealDictCursor
+from pyspark.sql import functions as F
 from databricks.sdk import WorkspaceClient
 
-def get_conn():
-    w = WorkspaceClient()
-    secret = w.secrets.get_secret(scope="database", key="lakebase-url")
-    url = base64.b64decode(secret.value).decode("utf-8")
-    return psycopg2.connect(url)
+CATALOG = "workspace"
+SCHEMA  = "medical_coding"
 
-conn = get_conn()
-cur  = conn.cursor()
+# ── Lakebase connection ───────────────────────────────────────────────────────
+w      = WorkspaceClient()
+secret = w.secrets.get_secret(scope="database", key="lakebase-url")
+db_url = base64.b64decode(secret.value).decode("utf-8")
 
-# Read all sessions with their suggestions
-cur.execute("""
-    SELECT
-        s.session_id,
-        s.note_text,
-        s.specialty,
-        s.user_email,
-        s.created_at,
-        s.updated_at,
-        COUNT(sg.suggestion_id)                                    AS total_suggestions,
-        COUNT(sg.suggestion_id) FILTER (WHERE sg.accepted = true)  AS accepted_count,
-        COUNT(sg.suggestion_id) FILTER (WHERE sg.accepted = false) AS rejected_count,
-        ARRAY_AGG(sg.icd10_code ORDER BY sg.confidence DESC)       AS suggested_codes
-    FROM coding_sessions s
-    LEFT JOIN code_suggestions sg ON sg.session_id = s.session_id
-    GROUP BY s.session_id, s.note_text, s.specialty, s.user_email, s.created_at, s.updated_at
-    ORDER BY s.created_at DESC
+conn = psycopg2.connect(db_url, connect_timeout=30)
+cur  = conn.cursor(cursor_factory=RealDictCursor)
+
+# COMMAND ----------
+# MAGIC %md ### 1 — Enable Delta CDF on target tables (idempotent)
+
+# COMMAND ----------
+for table in ("sessions_history", "suggestions_history"):
+    spark.sql(f"""
+        CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.{table}
+        USING DELTA
+        TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
+    """)
+
+# sessions_history
+spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.sessions_history
+    (
+        session_id   BIGINT,
+        specialty    STRING,
+        user_email   STRING,
+        note_text    STRING,
+        created_at   TIMESTAMP,
+        updated_at   TIMESTAMP
+    )
+    USING DELTA
+    TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
 """)
-sessions = cur.fetchall()
-cols = [d[0] for d in cur.description]
 
-# Read tool call audit log
-cur.execute("""
-    SELECT call_id, session_id, tool_name, tool_input::text, tool_output::text, created_at
-    FROM agent_tool_calls
-    ORDER BY created_at DESC
+# suggestions_history
+spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.suggestions_history
+    (
+        suggestion_id BIGINT,
+        session_id    BIGINT,
+        icd10_code    STRING,
+        description   STRING,
+        confidence    DOUBLE,
+        explanation   STRING,
+        accepted      BOOLEAN,
+        created_at    TIMESTAMP,
+        updated_at    TIMESTAMP
+    )
+    USING DELTA
+    TBLPROPERTIES ('delta.enableChangeDataFeed' = 'true')
 """)
-tool_calls = cur.fetchall()
-tool_cols  = [d[0] for d in cur.description]
+
+# Watermark table — persists last-seen timestamp per source table
+spark.sql(f"""
+    CREATE TABLE IF NOT EXISTS {CATALOG}.{SCHEMA}.cdc_watermarks
+    (
+        source_table STRING,
+        watermark    TIMESTAMP
+    )
+    USING DELTA
+""")
+
+print("Delta tables ready.")
+
+# COMMAND ----------
+# MAGIC %md ### 2 — Helper: get/set watermark
+
+# COMMAND ----------
+from datetime import datetime, timezone
+
+def get_watermark(source_table: str) -> str:
+    rows = spark.sql(f"""
+        SELECT watermark FROM {CATALOG}.{SCHEMA}.cdc_watermarks
+        WHERE source_table = '{source_table}'
+    """).collect()
+    if rows:
+        return rows[0]["watermark"].isoformat()
+    return "1970-01-01T00:00:00+00:00"   # first run: get everything
+
+def set_watermark(source_table: str, ts: str):
+    spark.sql(f"""
+        MERGE INTO {CATALOG}.{SCHEMA}.cdc_watermarks AS t
+        USING (SELECT '{source_table}' AS source_table,
+                      CAST('{ts}' AS TIMESTAMP) AS watermark) AS s
+        ON t.source_table = s.source_table
+        WHEN MATCHED THEN UPDATE SET t.watermark = s.watermark
+        WHEN NOT MATCHED THEN INSERT (source_table, watermark)
+                              VALUES (s.source_table, s.watermark)
+    """)
+
+# COMMAND ----------
+# MAGIC %md ### 3 — Incremental sync: coding_sessions → sessions_history
+
+# COMMAND ----------
+wm_sessions = get_watermark("coding_sessions")
+print(f"Sessions watermark: {wm_sessions}")
+
+cur.execute("""
+    SELECT session_id, specialty, user_email, note_text,
+           created_at AT TIME ZONE 'UTC' AS created_at,
+           COALESCE(updated_at, created_at) AT TIME ZONE 'UTC' AS updated_at
+    FROM coding_sessions
+    WHERE COALESCE(updated_at, created_at) > %s
+    ORDER BY updated_at
+""", (wm_sessions,))
+new_sessions = cur.fetchall()
+print(f"  New/changed rows: {len(new_sessions)}")
+
+if new_sessions:
+    df_sessions = spark.createDataFrame(
+        [dict(r) for r in new_sessions],
+        schema="session_id BIGINT, specialty STRING, user_email STRING, "
+               "note_text STRING, created_at TIMESTAMP, updated_at TIMESTAMP"
+    )
+    df_sessions.createOrReplaceTempView("_new_sessions")
+
+    spark.sql(f"""
+        MERGE INTO {CATALOG}.{SCHEMA}.sessions_history AS t
+        USING _new_sessions AS s ON t.session_id = s.session_id
+        WHEN MATCHED THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT  *
+    """)
+
+    max_ts = max(r["updated_at"] for r in new_sessions)
+    set_watermark("coding_sessions", max_ts.isoformat())
+    print(f"  Watermark updated to {max_ts}")
+else:
+    print("  Nothing new — skipping.")
+
+# COMMAND ----------
+# MAGIC %md ### 4 — Incremental sync: code_suggestions → suggestions_history
+
+# COMMAND ----------
+wm_sugg = get_watermark("code_suggestions")
+print(f"Suggestions watermark: {wm_sugg}")
+
+cur.execute("""
+    SELECT suggestion_id, session_id, icd10_code, description,
+           confidence, explanation, accepted,
+           created_at AT TIME ZONE 'UTC' AS created_at,
+           COALESCE(updated_at, created_at) AT TIME ZONE 'UTC' AS updated_at
+    FROM code_suggestions
+    WHERE COALESCE(updated_at, created_at) > %s
+    ORDER BY updated_at
+""", (wm_sugg,))
+new_sugg = cur.fetchall()
+print(f"  New/changed rows: {len(new_sugg)}")
+
+if new_sugg:
+    df_sugg = spark.createDataFrame(
+        [dict(r) for r in new_sugg],
+        schema="suggestion_id BIGINT, session_id BIGINT, icd10_code STRING, "
+               "description STRING, confidence DOUBLE, explanation STRING, "
+               "accepted BOOLEAN, created_at TIMESTAMP, updated_at TIMESTAMP"
+    )
+    df_sugg.createOrReplaceTempView("_new_sugg")
+
+    spark.sql(f"""
+        MERGE INTO {CATALOG}.{SCHEMA}.suggestions_history AS t
+        USING _new_sugg AS s ON t.suggestion_id = s.suggestion_id
+        WHEN MATCHED THEN UPDATE SET *
+        WHEN NOT MATCHED THEN INSERT  *
+    """)
+
+    max_ts = max(r["updated_at"] for r in new_sugg)
+    set_watermark("code_suggestions", max_ts.isoformat())
+    print(f"  Watermark updated to {max_ts}")
+else:
+    print("  Nothing new — skipping.")
 
 cur.close()
 conn.close()
 
-print(f"Sessions: {len(sessions)}")
-print(f"Tool calls: {len(tool_calls)}")
+# COMMAND ----------
+# MAGIC %md ### 5 — Analytics query using Change Data Feed
 
 # COMMAND ----------
+# Read only rows that changed since the last CDC version
+# (demonstrates CDF — downstream jobs can use this pattern)
+from delta.tables import DeltaTable
 
-# MAGIC %md ## Step 2 — Write sessions history to Delta
+dt = DeltaTable.forName(spark, f"{CATALOG}.{SCHEMA}.sessions_history")
+latest_version = dt.history(1).collect()[0]["version"]
 
-# COMMAND ----------
+if latest_version >= 1:
+    changes = spark.read \
+        .format("delta") \
+        .option("readChangeFeed", "true") \
+        .option("startingVersion", max(0, latest_version - 5)) \
+        .table(f"{CATALOG}.{SCHEMA}.sessions_history")
 
-spark.sql("CREATE SCHEMA IF NOT EXISTS main.medical_coding")
+    print(f"CDF — rows changed in last 5 versions: {changes.count()}")
+    changes.select("session_id", "specialty", "_change_type", "_commit_timestamp") \
+           .show(20, truncate=False)
 
-if sessions:
-    sessions_data = [dict(zip(cols, row)) for row in sessions]
-    # Convert timestamps and arrays for Spark
-    for row in sessions_data:
-        row["created_at"] = str(row["created_at"])
-        row["updated_at"] = str(row["updated_at"])
-        row["suggested_codes"] = row["suggested_codes"] or []
-        row["total_suggestions"] = int(row["total_suggestions"] or 0)
-        row["accepted_count"]    = int(row["accepted_count"] or 0)
-        row["rejected_count"]    = int(row["rejected_count"] or 0)
-
-    df_sessions = spark.createDataFrame(sessions_data)
-
-    (df_sessions.write
-       .format("delta")
-       .mode("overwrite")
-       .option("overwriteSchema", "true")
-       .saveAsTable("main.medical_coding.sessions_history"))
-
-    print(f"Written {len(sessions)} sessions to main.medical_coding.sessions_history")
-else:
-    print("No sessions yet — run the app first to create some sessions, then re-run this notebook")
-
-# COMMAND ----------
-
-# MAGIC %md ## Step 3 — Write tool call audit log to Delta
-
-# COMMAND ----------
-
-if tool_calls:
-    tool_data = [dict(zip(tool_cols, row)) for row in tool_calls]
-    for row in tool_data:
-        row["created_at"] = str(row["created_at"])
-
-    df_tools = spark.createDataFrame(tool_data)
-
-    (df_tools.write
-       .format("delta")
-       .mode("overwrite")
-       .option("overwriteSchema", "true")
-       .saveAsTable("main.medical_coding.agent_tool_calls_history"))
-
-    print(f"Written {len(tool_calls)} tool calls to main.medical_coding.agent_tool_calls_history")
-
-# COMMAND ----------
-
-# MAGIC %md ## Step 4 — Analytics summary
-
-# COMMAND ----------
-
-# This is what the Delta table looks like for analytics
-spark.sql("""
-    SELECT
-        specialty,
-        COUNT(*) AS total_sessions,
-        SUM(total_suggestions) AS total_codes_suggested,
-        SUM(accepted_count) AS total_accepted,
-        ROUND(SUM(accepted_count) * 100.0 / NULLIF(SUM(total_suggestions), 0), 1) AS acceptance_rate_pct
-    FROM main.medical_coding.sessions_history
+# Analytics summary
+spark.sql(f"""
+    SELECT specialty,
+           COUNT(*)                       AS total_sessions,
+           COUNT(DISTINCT user_email)     AS unique_users,
+           ROUND(AVG(code_count), 1)      AS avg_codes
+    FROM (
+        SELECT s.session_id, s.specialty, s.user_email,
+               COUNT(sg.suggestion_id) AS code_count
+        FROM {CATALOG}.{SCHEMA}.sessions_history s
+        LEFT JOIN {CATALOG}.{SCHEMA}.suggestions_history sg
+               ON sg.session_id = s.session_id
+        GROUP BY s.session_id, s.specialty, s.user_email
+    )
     GROUP BY specialty
     ORDER BY total_sessions DESC
-""").show() if sessions else print("No data yet")
+""").show(20, truncate=False)

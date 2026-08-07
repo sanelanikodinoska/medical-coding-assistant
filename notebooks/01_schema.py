@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS code_suggestions (
     confidence    NUMERIC(4,3),
     explanation   TEXT,
     accepted      BOOLEAN DEFAULT NULL,
-    created_at    TIMESTAMPTZ DEFAULT now()
+    created_at    TIMESTAMPTZ DEFAULT now(),
+    updated_at    TIMESTAMPTZ DEFAULT now()
 );
 
 CREATE TABLE IF NOT EXISTS agent_tool_calls (
@@ -45,6 +46,41 @@ CREATE TABLE IF NOT EXISTS agent_tool_calls (
     tool_output JSONB,
     created_at  TIMESTAMPTZ DEFAULT now()
 );
+
+-- ICD-10 lookup table for Postgres full-text search (populated by notebook 05)
+CREATE TABLE IF NOT EXISTS icd10_lookup (
+    code        TEXT PRIMARY KEY,
+    description TEXT NOT NULL,
+    category    TEXT,
+    tsvec       TSVECTOR GENERATED ALWAYS AS
+                    (to_tsvector('english', description)) STORED
+);
+
+CREATE INDEX IF NOT EXISTS icd10_lookup_tsvec_idx ON icd10_lookup USING GIN (tsvec);
+CREATE INDEX IF NOT EXISTS icd10_lookup_desc_idx  ON icd10_lookup (description text_pattern_ops);
+
+-- Indexes for CDC watermark queries (updated_at columns)
+CREATE INDEX IF NOT EXISTS sessions_updated_at_idx    ON coding_sessions  (updated_at);
+CREATE INDEX IF NOT EXISTS suggestions_updated_at_idx ON code_suggestions (updated_at);
+CREATE INDEX IF NOT EXISTS sessions_session_id_idx    ON code_suggestions (session_id);
+CREATE INDEX IF NOT EXISTS tool_calls_session_id_idx  ON agent_tool_calls (session_id);
+
+-- Auto-update updated_at on row change
+CREATE OR REPLACE FUNCTION set_updated_at()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN NEW.updated_at = now(); RETURN NEW; END;
+$$;
+
+DROP TRIGGER IF EXISTS sessions_updated_at    ON coding_sessions;
+DROP TRIGGER IF EXISTS suggestions_updated_at ON code_suggestions;
+
+CREATE TRIGGER sessions_updated_at
+    BEFORE UPDATE ON coding_sessions
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+CREATE TRIGGER suggestions_updated_at
+    BEFORE UPDATE ON code_suggestions
+    FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 ALTER TABLE coding_sessions  REPLICA IDENTITY FULL;
 ALTER TABLE code_suggestions REPLICA IDENTITY FULL;
