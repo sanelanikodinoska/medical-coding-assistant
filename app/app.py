@@ -122,19 +122,19 @@ def code_note():
     if not note_text:
         abort(400, description="note_text is required")
 
-    # Create session
-    rows = lakebase.run_query("""
+    # Create session (must commit before agent references session_id)
+    session = lakebase.run_write_returning("""
         INSERT INTO coding_sessions (specialty, user_email, note_text)
-        VALUES (%s, %s, %s) RETURNING session_id
+        VALUES (%s, %s, %s) RETURNING *
     """, (specialty, email, note_text))
-    session_id = rows[0]["session_id"]
+    session_id = session["session_id"]
 
-    suggestions = agent.run_agent(session_id, note_text, specialty, email)
-
-    return jsonify({
-        "session_id":  session_id,
-        "suggestions": [dict(r) for r in suggestions]
-    })
+    try:
+        suggestions = agent.run_agent(session_id, note_text, specialty, email)
+        session["suggestions"] = suggestions
+        return jsonify(session)
+    except Exception as e:
+        return jsonify({"error": str(e), "session": session}), 500
 
 # ── Suggestion accept / reject ────────────────────────────────────────────────
 
