@@ -100,7 +100,7 @@ NLM ICD-10 API          MTSamples Clinical Notes
 ## Key Implementation Details
 
 ### Catalog and Schema
-All Delta tables use **`workspace.medical_coding`** — this is the only catalog available in this workspace (verified: `workspace`, `dbacademy`, `samples`, `system` — `main` does not exist). Every notebook uses `CATALOG = "workspace"`.
+All Delta tables use **`workspace.medical_coding`** — this is the only catalog available in this workspace (verified: `workspace`, `dbacademy`, `samples`, `system`). Every notebook uses `CATALOG = "workspace"`.
 
 Validation query:
 ```sql
