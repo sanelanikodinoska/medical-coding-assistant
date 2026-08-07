@@ -51,10 +51,13 @@ CREATE TABLE IF NOT EXISTS agent_tool_calls (
 CREATE TABLE IF NOT EXISTS icd10_lookup (
     code        TEXT PRIMARY KEY,
     description TEXT NOT NULL,
-    category    TEXT,
     tsvec       TSVECTOR GENERATED ALWAYS AS
                     (to_tsvector('english', description)) STORED
 );
+
+-- Add updated_at to existing tables FIRST (before indexes reference it)
+ALTER TABLE coding_sessions  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
+ALTER TABLE code_suggestions ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT now();
 
 CREATE INDEX IF NOT EXISTS icd10_lookup_tsvec_idx ON icd10_lookup USING GIN (tsvec);
 CREATE INDEX IF NOT EXISTS icd10_lookup_desc_idx  ON icd10_lookup (description text_pattern_ops);

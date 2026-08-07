@@ -52,7 +52,7 @@ print("Table and index ready.")
 
 # COMMAND ----------
 df = spark.table("workspace.medical_coding.icd10_codes") \
-          .select("code", "description", "category") \
+          .select("code", "description") \
           .dropDuplicates(["code"])
 
 rows   = df.collect()
@@ -65,7 +65,7 @@ print(f"Loaded {total:,} codes from Delta.")
 # COMMAND ----------
 BATCH_SIZE = 1000
 
-data = [(r["code"], r["description"] or "", r.get("category") or "")
+data = [(r["code"], r["description"] or "")
         for r in rows]
 
 # Truncate first for clean reload (safe because Delta is the source of truth)
@@ -74,11 +74,10 @@ cur.execute("TRUNCATE TABLE icd10_lookup")
 for i in range(0, total, BATCH_SIZE):
     batch = data[i : i + BATCH_SIZE]
     execute_batch(cur, """
-        INSERT INTO icd10_lookup (code, description, category)
-        VALUES (%s, %s, %s)
+        INSERT INTO icd10_lookup (code, description)
+        VALUES (%s, %s)
         ON CONFLICT (code) DO UPDATE
-            SET description = EXCLUDED.description,
-                category    = EXCLUDED.category
+            SET description = EXCLUDED.description
     """, batch)
     conn.commit()
     print(f"  Inserted {min(i + BATCH_SIZE, total):,}/{total:,}")
