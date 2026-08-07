@@ -40,12 +40,11 @@ def health():
 def stats():
     rows = lakebase.run_query("""
         SELECT
-            (SELECT COUNT(*) FROM coding_sessions)    AS total_sessions,
-            (SELECT COUNT(*) FROM code_suggestions)   AS total_suggestions,
-            (SELECT COUNT(*) FROM code_suggestions
-             WHERE accepted = TRUE)                   AS accepted_codes,
-            (SELECT COUNT(*) FROM code_suggestions
-             WHERE accepted = FALSE AND accepted IS NOT NULL) AS rejected_codes
+            (SELECT COUNT(*) FROM coding_sessions)                                    AS total_sessions,
+            (SELECT COUNT(*) FROM code_suggestions)                                   AS total_suggestions,
+            (SELECT COUNT(*) FROM code_suggestions WHERE accepted = TRUE)             AS accepted,
+            (SELECT COUNT(*) FROM code_suggestions WHERE accepted = FALSE)            AS rejected,
+            (SELECT COUNT(DISTINCT specialty) FROM coding_sessions WHERE specialty IS NOT NULL) AS specialties
     """)
     return jsonify(dict(rows[0])) if rows else jsonify({})
 
