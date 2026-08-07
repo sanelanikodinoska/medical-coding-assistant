@@ -176,7 +176,7 @@
                   <span class="code-badge bg-blue-100 text-blue-800 px-2 py-1 rounded whitespace-nowrap"
                         x-text="s.icd10_code"></span>
                   <span x-show="needs7thChar(s.icd10_code)"
-                        :title="7thCharLabel(s.icd10_code)"
+                        :title="charWarningLabel(s.icd10_code)"
                         class="text-xs bg-amber-100 text-amber-700 border border-amber-300 px-1.5 py-0.5 rounded flex items-center gap-1 cursor-help">
                     ⚠ 7th char
                   </span>
@@ -231,7 +231,7 @@
                     <span class="code-badge bg-blue-100 text-blue-800 px-2 py-1 rounded whitespace-nowrap"
                           x-text="s.icd10_code"></span>
                     <span x-show="needs7thChar(s.icd10_code)"
-                          :title="7thCharLabel(s.icd10_code)"
+                          :title="charWarningLabel(s.icd10_code)"
                           class="text-xs bg-amber-100 text-amber-700 border border-amber-300 px-1.5 py-0.5 rounded flex items-center gap-1 cursor-help">
                       ⚠ 7th char
                     </span>
@@ -486,7 +486,7 @@ PLAN: Emergent PCI, aspirin 325mg, heparin drip, cardiology consult, ICU admissi
       );
     },
 
-    7thCharLabel(code) {
+    charWarningLabel(code) {
       if (/^[VWXY]/.test(code) || /^[ST]/.test(code))
         return 'Missing 7th character (A/D/S required)';
       if (/^O/.test(code))
